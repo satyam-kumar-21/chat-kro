@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createWebsiteSchema, widgetSettingsSchema } from "@live-chat/shared";
 import { AppError } from "../errors/app-error.js";
 import { Website } from "../models/index.js";
@@ -148,4 +149,27 @@ export async function disableWebsite(
   websiteId: string
 ) {
   return updateWebsite(actor, workspaceId, websiteId, { status: "disabled" });
+}
+
+export async function rotateWebsiteWidgetId(
+  actor: TenantActor,
+  workspaceId: string,
+  websiteId: string
+) {
+  const scope = await requireWorkspaceMember(actor, workspaceId, ["owner", "admin"]);
+  const website = await Website.findOneAndUpdate(
+    { _id: parseObjectId(websiteId, "website id"), workspaceId: scope.workspaceId },
+    { $set: { publicWidgetId: randomBytes(24).toString("base64url") } },
+    { new: true, runValidators: true }
+  );
+  if (!website) throw new AppError("Website not found", 404, "NOT_FOUND");
+  await writeAuditLog({
+    workspaceId: scope.workspaceId,
+    actorUserId: scope.userId,
+    action: "website.widget_id_rotated",
+    resourceType: "website",
+    resourceId: website._id,
+    changedFields: ["publicWidgetId"]
+  });
+  return website;
 }

@@ -6,6 +6,11 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, apiRequest, type AuthMeResponse } from "@/lib/api";
 import { widgetInstallSnippet } from "@/lib/widget-install";
+import { InboxPage } from "@/components/inbox-page";
+import {
+  AnalyticsPage, BillingUsagePage, CannedReplyManagementPage, ProfileSettingsPage,
+  TeamManagementPage, WebsiteListPage, WorkspaceSettingsPage
+} from "@/components/management-pages";
 
 type RecordValue = Record<string, unknown>;
 type Website = { id: string; name: string; domain: string; publicWidgetId: string; status?: string };
@@ -113,7 +118,7 @@ export function DashboardDataPage({ section, itemId }: { section: string; itemId
       const id = entry?.workspace?.id;
       if (!id) return;
       setWorkspaceId(id);
-      if (section === "analytics") return;
+      if (["analytics", "team", "canned-replies", "profile"].includes(section)) return;
       if (section === "billing") {
         if (entry.role !== "owner" && entry.role !== "admin") {
           throw new ApiError("You do not have permission to view billing.", 403);
@@ -156,7 +161,14 @@ export function DashboardDataPage({ section, itemId }: { section: string; itemId
   if (section === "websites" && itemId === "new") {
     return <WebsiteCreatePage />;
   }
-  if (section === "inbox") return <RealtimeInboxPage />;
+  if (section === "inbox") return <InboxPage />;
+  if (section === "websites" && !itemId) return <WebsiteListPage />;
+  if (section === "team") return <TeamManagementPage />;
+  if (section === "canned-replies") return <CannedReplyManagementPage />;
+  if (section === "analytics") return <AnalyticsPage />;
+  if (section === "settings") return <WorkspaceSettingsPage />;
+  if (section === "billing") return <BillingUsagePage />;
+  if (section === "profile") return <ProfileSettingsPage />;
 
   const title = titleFor(section);
   return <section>
@@ -192,7 +204,7 @@ function mergeInboxMessages(current: InboxMessage[], incoming: InboxMessage[]): 
   );
 }
 
-function RealtimeInboxPage() {
+export function RealtimeInboxPage() {
   const [workspaceId, setWorkspaceId] = useState("");
   const [conversations, setConversations] = useState<InboxConversation[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -510,7 +522,10 @@ function WebsiteSettingsEditor({ website, workspaceId }: { website: RecordValue;
       const [previewTitle, setPreviewTitle] = useState(typeof settings.title === "string" ? settings.title : "Chat with us");
       const [previewSubtitle, setPreviewSubtitle] = useState(typeof settings.subtitle === "string" ? settings.subtitle : "We usually reply shortly");
       const [previewGreeting, setPreviewGreeting] = useState(typeof settings.greeting === "string" ? settings.greeting : "Hi there! How can we help?");
-      const widgetId = String(website.publicWidgetId ?? "");
+      const [publicWidgetId, setPublicWidgetId] = useState(String(website.publicWidgetId ?? ""));
+      const [websiteStatus, setWebsiteStatus] = useState(String(website.status ?? "active"));
+      const [rotating, setRotating] = useState(false);
+      const widgetId = publicWidgetId;
       const snippet = widgetInstallSnippet(widgetId);
       const [copied, setCopied] = useState(false);
       const schedule = Array.isArray(settings.availabilitySchedule)
@@ -552,11 +567,35 @@ function WebsiteSettingsEditor({ website, workspaceId }: { website: RecordValue;
           availabilitySchedule: nextSchedule
         };
         try {
+          const domainInput = String(form.get("domain") ?? "").trim();
+          let domain = "";
+          try {
+            const domainUrl = new URL(domainInput.includes("://") ? domainInput : `https://${domainInput}`);
+            if (!["http:", "https:"].includes(domainUrl.protocol)) throw new Error();
+            domain = domainUrl.host.toLowerCase();
+          } catch {
+            throw new Error("Enter a valid website domain, such as example.com or http://localhost:3000.");
+          }
+          const allowedOrigins = String(form.get("allowedOrigins") ?? "")
+            .split(/[\n,]/)
+            .map((origin) => origin.trim())
+            .filter(Boolean)
+            .map((origin) => {
+              const parsed = new URL(origin);
+              if (!["http:", "https:"].includes(parsed.protocol) || parsed.origin !== origin) throw new Error();
+              return origin;
+            });
+          if (!allowedOrigins.length) throw new Error("Add at least one exact http(s) allowed origin.");
           await apiRequest(`/workspaces/${workspaceId}/websites/${String(website.id)}`, {
             method: "PATCH",
-            body: JSON.stringify({ widgetSettings: config })
+            body: JSON.stringify({
+              name: String(form.get("websiteName") ?? "").trim(),
+              domain,
+              allowedOrigins,
+              widgetSettings: config
+            })
           });
-          setStatus("Widget settings saved.");
+          setStatus("Website and widget settings saved.");
         } catch (cause) {
           setError(cause instanceof Error ? cause.message : "Unable to save widget settings.");
         } finally {
@@ -574,13 +613,54 @@ function WebsiteSettingsEditor({ website, workspaceId }: { website: RecordValue;
         }
       }
 
+      async function rotateId() {
+        if (!window.confirm("Rotate this widget ID? The old ID stops working immediately. You must update the embed script on every installed website.")) return;
+        setRotating(true);
+        setError("");
+        try {
+          const result = await apiRequest<{ website: { publicWidgetId: string }; warning: string }>(
+            `/workspaces/${workspaceId}/websites/${String(website.id)}/rotate-widget-id`,
+            { method: "POST", body: "{}" }
+          );
+          setPublicWidgetId(result.website.publicWidgetId);
+          setStatus(result.warning);
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : "Unable to rotate widget ID.");
+        } finally {
+          setRotating(false);
+        }
+      }
+
+      async function toggleWebsiteStatus() {
+        const next = websiteStatus === "active" ? "disabled" : "active";
+        if (next === "disabled" && !window.confirm("Disable this widget? It will stop initializing on the website.")) return;
+        try {
+          await apiRequest(`/workspaces/${workspaceId}/websites/${String(website.id)}`, {
+            method: "PATCH", body: JSON.stringify({ status: next })
+          });
+          setWebsiteStatus(next);
+          setStatus(`Website widget ${next === "active" ? "enabled" : "disabled"}.`);
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : "Unable to update website status.");
+        }
+      }
+
       return <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
         <section>
           <h1 className="text-xl font-semibold">{String(website.name)} widget</h1>
           <p className="mt-1 text-sm text-slate-600">{String(website.domain)} · Customize appearance and installation.</p>
           {error ? <div className="mt-4"><PageState message={error} error /></div> : null}
           {status ? <div className="mt-4"><PageState message={status} /></div> : null}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-white p-3 text-xs">
+            <span>Widget status: <strong className="capitalize">{websiteStatus}</strong></span>
+            <div className="flex gap-2"><button type="button" onClick={() => void toggleWebsiteStatus()} className="rounded border border-slate-300 px-3 py-2 font-medium">{websiteStatus === "active" ? "Disable widget" : "Enable widget"}</button><button type="button" disabled={rotating} onClick={() => void rotateId()} className="rounded border border-amber-300 px-3 py-2 font-medium text-amber-800 disabled:opacity-50">{rotating ? "Rotating…" : "Rotate widget ID"}</button></div>
+          </div>
           <form onSubmit={(event) => void save(event)} className="mt-5 space-y-5 rounded-lg border border-slate-200 bg-white p-5">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="block text-sm font-medium">Website name<input name="websiteName" required maxLength={120} defaultValue={String(website.name)} className="mt-1 min-h-10 w-full rounded-md border border-slate-300 px-3" /></label>
+              <label className="block text-sm font-medium">Website domain<input name="domain" required maxLength={253} defaultValue={String(website.domain)} className="mt-1 min-h-10 w-full rounded-md border border-slate-300 px-3" /></label>
+              <label className="block text-sm font-medium sm:col-span-2">Allowed origins<textarea name="allowedOrigins" required rows={2} defaultValue={Array.isArray(website.allowedOrigins) ? (website.allowedOrigins as string[]).join("\n") : ""} placeholder="https://example.com" className="mt-1 w-full rounded-md border border-slate-300 p-2 font-mono text-xs" /><span className="text-xs font-normal text-slate-500">Enter exact origins (scheme and port included), one per line. For localhost use http://localhost:3000.</span></label>
+            </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="block text-sm font-medium">Brand color<input name="accentColor" type="color" value={previewColor} onChange={(event) => setPreviewColor(event.target.value)} className="mt-1 block h-10 w-full rounded border border-slate-300 p-1" /></label>
               <label className="block text-sm font-medium">Launcher position<select name="position" defaultValue={String(settings.position ?? "bottom-right")} className="mt-1 min-h-10 w-full rounded-md border border-slate-300 px-3"><option value="bottom-right">Bottom right</option><option value="bottom-left">Bottom left</option></select></label>
@@ -617,6 +697,7 @@ function WebsiteSettingsEditor({ website, workspaceId }: { website: RecordValue;
           </form>
           <div className="mt-5 rounded-lg border border-slate-200 bg-white p-5">
             <div className="flex items-center justify-between gap-2"><h2 className="font-semibold">Installation code</h2><button type="button" onClick={() => void copySnippet()} disabled={!snippet.startsWith("<script>")} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium disabled:opacity-50">{copied ? "Copied" : "Copy"}</button></div>
+            <label className="mt-3 block text-xs font-medium">Public widget ID<input readOnly value={widgetId} className="mt-1 min-h-9 w-full rounded border border-slate-300 bg-slate-50 px-2 font-mono" /></label>
             <textarea readOnly rows={8} value={snippet} aria-label="Widget installation code" className="mt-3 w-full resize-y rounded-md border border-slate-300 bg-slate-50 p-3 font-mono text-xs" />
             <p className="mt-2 text-xs leading-5 text-slate-500">Paste this code before the closing <code>&lt;/body&gt;</code> tag. Supported: any CMS or website that permits custom HTML/script tags. See docs/widget-installation.md in the repository for platform notes.</p>
           </div>

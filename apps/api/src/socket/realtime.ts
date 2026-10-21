@@ -267,6 +267,11 @@ async function setAgentPresence(io: RealtimeServer, workspaceId: string) {
   io.to(workspacePresenceRoom(workspaceId)).emit("agent:presence", { online });
 }
 
+async function hasVisitorInConversation(io: RealtimeServer, conversationId: string): Promise<boolean> {
+  const sockets = await io.in(conversationRoom(conversationId)).fetchSockets();
+  return sockets.some((candidate) => candidate.data.actorType === "visitor");
+}
+
 async function joinConversation(
   io: RealtimeServer,
   socket: RealtimeSocket,
@@ -313,12 +318,20 @@ async function joinConversation(
   const joined = socket.data.joinedConversations as Map<string, string>;
   if (socket.data.actorType === "visitor") {
     for (const previousId of joined.keys()) {
-      if (previousId !== conversationId) await socket.leave(conversationRoom(previousId));
+      if (previousId !== conversationId) {
+        await socket.leave(conversationRoom(previousId));
+        if (!(await hasVisitorInConversation(io, previousId))) {
+          io.to(conversationRoom(previousId)).emit("visitor:presence", { online: false });
+        }
+      }
     }
     joined.clear();
   }
   joined.set(conversationId, workspaceId);
   await socket.join(conversationRoom(conversationId));
+  io.to(conversationRoom(conversationId)).emit("visitor:presence", {
+    online: await hasVisitorInConversation(io, conversationId)
+  });
   return {
     joined: true,
     conversation: conversationEvent(conversation),
@@ -434,7 +447,11 @@ function bindSocketEvents(io: RealtimeServer, socket: RealtimeSocket) {
     await requireWorkspaceMember(actor, parsed.data.workspaceId);
     await socket.join(workspaceInboxRoom(parsed.data.workspaceId));
     const conversations = await listConversations(actor, parsed.data.workspaceId, { limit: 50 });
-    return { joined: true as const, conversations: conversations.map(conversationEvent) };
+    const onlineSockets = await io.in(workspaceAgentsRoom(parsed.data.workspaceId)).fetchSockets();
+    const onlineAgentIds = [...new Set(onlineSockets
+      .filter((item) => item.data.actorType === "agent" && typeof item.data.userId === "string")
+      .map((item) => String(item.data.userId)))];
+    return { joined: true as const, conversations: conversations.map(conversationEvent), onlineAgentIds };
   }));
 
   socket.on("conversation:open", (input: unknown, ack?: Ack) => void wrap(ack, async () => {
@@ -672,6 +689,29 @@ function bindSocketEvents(io: RealtimeServer, socket: RealtimeSocket) {
       void setAgentPresence(io, workspaceId).catch((error: unknown) => {
         logger.error({ err: error, workspaceId }, "Unable to update agent presence");
       });
+      const userId = socket.data.userId;
+      if (typeof userId === "string") {
+        void io.in(workspaceAgentsRoom(workspaceId)).fetchSockets().then((sockets) => {
+          const stillOnline = sockets.some((candidate) =>
+            candidate.data.actorType === "agent" && candidate.data.userId === userId
+          );
+          if (!stillOnline) {
+            io.to(workspaceInboxRoom(workspaceId)).emit("workspace:agent-presence", { userId, online: false });
+          }
+        }).catch((error: unknown) => {
+          logger.error({ err: error, workspaceId, userId }, "Unable to update member presence");
+        });
+      }
+    }
+    if (socket.data.actorType === "visitor") {
+      const joined = socket.data.joinedConversations as Map<string, string> | undefined;
+      for (const conversationId of joined?.keys() ?? []) {
+        void hasVisitorInConversation(io, conversationId).then((online) => {
+          if (!online) io.to(conversationRoom(conversationId)).emit("visitor:presence", { online: false });
+        }).catch((error: unknown) => {
+          logger.error({ err: error, conversationId }, "Unable to update visitor presence");
+        });
+      }
     }
   });
 }
@@ -794,6 +834,7 @@ export async function createRealtimeServer(server: HttpServer): Promise<Realtime
           await socket.join(workspaceAgentRoom(workspaceId, userId));
           await socket.join(workspacePresenceRoom(workspaceId));
           await setAgentPresence(io, workspaceId);
+          io.to(workspaceInboxRoom(workspaceId)).emit("workspace:agent-presence", { userId, online: true });
         }
         const timer = setInterval(() => {
           void assertAgentSession(socket).catch(() => socket.disconnect(true));
@@ -851,4 +892,8 @@ export function emitToConversation(
     const receipt = z.object({ readerType: z.enum(["visitor", "agent"]) }).strict().parse(payload);
     room?.emit("conversation:read", receipt);
   }
+}
+
+export async function disconnectWorkspaceMember(workspaceId: string, userId: string): Promise<void> {
+  await ioServer?.in(workspaceAgentRoom(workspaceId, userId)).disconnectSockets(true);
 }

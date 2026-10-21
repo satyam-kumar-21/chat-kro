@@ -5,11 +5,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { app } from "../app.js";
 import {
   AuditLog,
+  Conversation,
   EmailVerificationToken,
+  InternalNote,
+  Message,
   PasswordResetToken,
   Session,
   SubscriptionUsage,
   User,
+  Visitor,
   Website,
   Workspace,
   WorkspaceMember
@@ -17,11 +21,15 @@ import {
 
 const models = [
   AuditLog,
+  Conversation,
   EmailVerificationToken,
+  InternalNote,
+  Message,
   PasswordResetToken,
   Session,
   SubscriptionUsage,
   User,
+  Visitor,
   Website,
   Workspace,
   WorkspaceMember
@@ -53,11 +61,15 @@ afterAll(async () => {
 beforeEach(async () => {
   await Promise.all([
     AuditLog.deleteMany({}),
+    Conversation.deleteMany({}),
     EmailVerificationToken.deleteMany({}),
+    InternalNote.deleteMany({}),
+    Message.deleteMany({}),
     PasswordResetToken.deleteMany({}),
     Session.deleteMany({}),
     SubscriptionUsage.deleteMany({}),
     User.deleteMany({}),
+    Visitor.deleteMany({}),
     Website.deleteMany({}),
     Workspace.deleteMany({}),
     WorkspaceMember.deleteMany({})
@@ -131,6 +143,41 @@ describe("authentication and onboarding", () => {
       });
     expect(websiteResponse.status).toBe(201);
     expect(websiteResponse.body.website.publicWidgetId).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    const visitor = await Visitor.create({
+      workspaceId,
+      websiteId: websiteResponse.body.website.id,
+      visitorId: "v".repeat(64),
+      displayName: "Inbox visitor",
+      email: "visitor@example.test",
+      currentPageUrl: "https://example.test/help"
+    });
+    const conversation = await Conversation.create({
+      workspaceId,
+      websiteId: websiteResponse.body.website.id,
+      visitorId: visitor._id,
+      lastMessagePreview: "Help needed"
+    });
+    const listResponse = await request(app)
+      .get(`/workspaces/${workspaceId}/conversations?search=Inbox%20visitor&assignment=unassigned`)
+      .set("Cookie", loginCookies.map((item) => item.split(";")[0]!).join("; "));
+    expect(listResponse.status).toBe(200);
+    expect(listResponse.body.conversations[0]).toMatchObject({
+      id: conversation._id.toString(),
+      visitor: { displayName: "Inbox visitor", email: "visitor@example.test" },
+      website: { name: "Main site" },
+      assignedAgentId: null
+    });
+    const noteResponse = await request(app)
+      .post(`/workspaces/${workspaceId}/conversations/${conversation._id}/notes`)
+      .set("Cookie", loginCookies.map((item) => item.split(";")[0]!).join("; "))
+      .set("X-CSRF-Token", cookieToken(originalCsrf))
+      .send({ body: "Internal follow-up" });
+    expect(noteResponse.status).toBe(201);
+    expect(noteResponse.body.note).toMatchObject({ body: "Internal follow-up", author: "You" });
+    const notesResponse = await request(app)
+      .get(`/workspaces/${workspaceId}/conversations/${conversation._id}/notes`)
+      .set("Cookie", loginCookies.map((item) => item.split(";")[0]!).join("; "));
+    expect(notesResponse.body.notes).toHaveLength(1);
     const completedOnboarding = await request(app)
       .get(`/workspaces/${workspaceId}/onboarding`)
       .set("Cookie", loginCookies.map((item) => item.split(";")[0]!).join("; "));
@@ -142,6 +189,10 @@ describe("authentication and onboarding", () => {
       .set("X-CSRF-Token", cookieToken(originalCsrf))
       .send({ name: "Sales support" });
     expect(secondWorkspace.status).toBe(201);
+    const crossTenantNotes = await request(app)
+      .get(`/workspaces/${secondWorkspace.body.workspace.id}/conversations/${conversation._id}/notes`)
+      .set("Cookie", loginCookies.map((item) => item.split(";")[0]!).join("; "));
+    expect(crossTenantNotes.status).toBe(404);
     const updatedMe = await request(app)
       .get("/auth/me")
       .set("Cookie", loginCookies.map((item) => item.split(";")[0]!).join("; "));
@@ -200,6 +251,36 @@ describe("authentication and onboarding", () => {
     expect(response.status).toBe(202);
     expect(response.body.message).toContain("If the account exists");
     expect(response.body).not.toHaveProperty("developmentResetUrl");
+  });
+
+  it("persists notification preferences through the authenticated preferences API", async () => {
+    const password = "secure-password-with-more-than-12";
+    await registerAndVerify("preferences@example.test", password);
+    const login = await request(app).post("/auth/login").send({
+      email: "preferences@example.test",
+      password
+    });
+    const cookies = responseCookies(login);
+    const cookieHeader = cookies.map((item) => item.split(";")[0]!).join("; ");
+    const csrf = cookieValue(cookies, "relay_csrf");
+
+    const initial = await request(app).get("/auth/preferences").set("Cookie", cookieHeader);
+    expect(initial.body.preferences).toEqual({ sound: false, desktop: false });
+    const saved = await request(app)
+      .patch("/auth/preferences")
+      .set("Cookie", cookieHeader)
+      .set("X-CSRF-Token", cookieToken(csrf))
+      .send({ sound: true, desktop: true });
+    expect(saved.status).toBe(200);
+    expect(saved.body.preferences).toEqual({ sound: true, desktop: true });
+    const refreshed = await request(app).get("/auth/preferences").set("Cookie", cookieHeader);
+    expect(refreshed.body.preferences).toEqual({ sound: true, desktop: true });
+    const invalid = await request(app)
+      .patch("/auth/preferences")
+      .set("Cookie", cookieHeader)
+      .set("X-CSRF-Token", cookieToken(csrf))
+      .send({ sound: true, desktop: true, role: "admin" });
+    expect(invalid.status).toBe(400);
   });
 
   it("resets passwords with a single-use token and revokes existing sessions", async () => {

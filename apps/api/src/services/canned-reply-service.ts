@@ -16,9 +16,40 @@ function safeBody(body: string): string {
   return safe;
 }
 
-export async function listCannedReplies(actor: TenantActor, workspaceId: string) {
+export async function listCannedReplies(actor: TenantActor, workspaceId: string, search = "") {
   const scope = await requireWorkspaceMember(actor, workspaceId);
-  return CannedReply.find({ workspaceId: scope.workspaceId }).sort({ shortcut: 1 }).lean();
+  const filter: Record<string, unknown> = { workspaceId: scope.workspaceId };
+  const query = search.trim().slice(0, 100);
+  if (query) {
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const expression = new RegExp(escaped, "i");
+    filter.$or = [{ title: expression }, { shortcut: expression }, { body: expression }];
+  }
+  return CannedReply.find(filter).sort({ shortcut: 1 }).limit(100).lean();
+}
+
+export async function updateCannedReply(
+  actor: TenantActor,
+  workspaceId: string,
+  cannedReplyId: string,
+  input: unknown
+) {
+  const scope = await requireWorkspaceMember(actor, workspaceId, ["owner", "admin", "supervisor"]);
+  const parsed = cannedReplyInputSchema.partial().safeParse(input);
+  if (!parsed.success || !Object.keys(parsed.data).length) {
+    throw new AppError("Invalid canned reply", 400, "VALIDATION_ERROR");
+  }
+  const update = {
+    ...parsed.data,
+    ...(parsed.data.body ? { body: safeBody(parsed.data.body) } : {})
+  };
+  const reply = await CannedReply.findOneAndUpdate(
+    { _id: parseObjectId(cannedReplyId, "canned reply id"), workspaceId: scope.workspaceId },
+    { $set: update },
+    { new: true, runValidators: true }
+  );
+  if (!reply) throw new AppError("Canned reply not found", 404, "NOT_FOUND");
+  return reply;
 }
 
 export async function createCannedReply(

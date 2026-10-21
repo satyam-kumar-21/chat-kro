@@ -4,7 +4,7 @@ import { z } from "zod";
 import { registrationSchema } from "@live-chat/shared";
 import { env } from "../config/env.js";
 import { AppError } from "../errors/app-error.js";
-import { requireAuthentication } from "../middleware/authenticate.js";
+import { actorFromRequest, requireAuthentication } from "../middleware/authenticate.js";
 import { requireCsrfToken } from "../middleware/csrf.js";
 import { EmailVerificationToken, User, WorkspaceMember } from "../models/index.js";
 import { hashPassword } from "../security/passwords.js";
@@ -28,6 +28,7 @@ import {
   verifyUserPassword
 } from "../services/identity-service.js";
 import { sendActionEmail } from "../services/email-service.js";
+import { acceptInvitation } from "../services/invitation-service.js";
 
 export const authRouter = Router();
 const authOrigin = env.WEB_ORIGIN;
@@ -206,6 +207,16 @@ authRouter.post("/logout", requireAuthentication, requireCsrfToken, async (reque
   response.status(204).end();
 });
 
+authRouter.post("/accept-invitation", requireAuthentication, requireCsrfToken, async (request, response) => {
+  const parsed = tokenSchema.safeParse(request.body);
+  if (!parsed.success) throw new AppError("Invitation is invalid or expired", 404, "NOT_FOUND");
+  const accepted = await acceptInvitation(
+    actorFromRequest(request),
+    parsed.data.token
+  );
+  response.json({ accepted });
+});
+
 authRouter.get("/me", requireAuthentication, async (request, response) => {
   const token = request.cookies?.[sessionCookieName] as string;
   const session = await findSessionByToken(token);
@@ -232,6 +243,50 @@ authRouter.get("/me", requireAuthentication, async (request, response) => {
       role: membership.role
     }))
   });
+});
+
+authRouter.patch("/profile", requireAuthentication, requireCsrfToken, async (request, response) => {
+  const parsed = z.object({
+    name: z.string().trim().min(1).max(120).optional(),
+    avatarUrl: z.union([
+      z.string().url().max(2048).refine((value) => ["http:", "https:"].includes(new URL(value).protocol)),
+      z.literal("")
+    ]).nullable().optional()
+  }).strict().refine((value) => Object.keys(value).length > 0).safeParse(request.body);
+  if (!parsed.success) throw new AppError("Invalid profile details", 400, "VALIDATION_ERROR");
+  const update: Record<string, unknown> = {};
+  if (parsed.data.name !== undefined) update.name = parsed.data.name;
+  if (parsed.data.avatarUrl !== undefined) update.avatarUrl = parsed.data.avatarUrl || null;
+  const user = await User.findOneAndUpdate(
+    { _id: actorFromRequest(request).userId, accountStatus: "active" },
+    { $set: update },
+    { new: true, runValidators: true }
+  ).select("name email emailVerifiedAt avatarUrl");
+  if (!user) throw new AppError("Account not found", 404, "NOT_FOUND");
+  response.json({ user: { id: user._id.toString(), name: user.name, email: user.email, emailVerifiedAt: user.emailVerifiedAt, avatarUrl: user.avatarUrl } });
+});
+
+authRouter.get("/preferences", requireAuthentication, async (request, response) => {
+  const user = await User.findOne({ _id: actorFromRequest(request).userId, accountStatus: "active" })
+    .select("notificationPreferences")
+    .lean();
+  if (!user) throw new AppError("Account not found", 404, "NOT_FOUND");
+  response.json({ preferences: user.notificationPreferences ?? { sound: false, desktop: false } });
+});
+
+authRouter.patch("/preferences", requireAuthentication, requireCsrfToken, async (request, response) => {
+  const parsed = z.object({
+    sound: z.boolean(),
+    desktop: z.boolean()
+  }).strict().safeParse(request.body);
+  if (!parsed.success) throw new AppError("Invalid notification preferences", 400, "VALIDATION_ERROR");
+  const user = await User.findOneAndUpdate(
+    { _id: actorFromRequest(request).userId, accountStatus: "active" },
+    { $set: { notificationPreferences: parsed.data } },
+    { new: true, runValidators: true }
+  ).select("notificationPreferences");
+  if (!user) throw new AppError("Account not found", 404, "NOT_FOUND");
+  response.json({ preferences: user.notificationPreferences });
 });
 
 authRouter.post("/password-reset", async (request, response) => {

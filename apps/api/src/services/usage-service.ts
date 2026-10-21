@@ -1,16 +1,24 @@
 import { AppError } from "../errors/app-error.js";
-import { SubscriptionUsage, Workspace } from "../models/index.js";
+import {
+  Conversation,
+  Message,
+  SubscriptionUsage,
+  Website,
+  Workspace,
+  WorkspaceMember
+} from "../models/index.js";
 import { parseObjectId, requireWorkspaceMember, type TenantActor } from "./tenant-authorization.js";
 
 export const planLimits = {
-  free: { websites: 1, members: 2, monthlyConversations: 100, monthlyMessages: 1000 },
-  starter: { websites: 3, members: 5, monthlyConversations: 1000, monthlyMessages: 10000 },
-  pro: { websites: 10, members: 20, monthlyConversations: 10000, monthlyMessages: 100000 },
+  free: { websites: 1, members: 2, monthlyConversations: 100, monthlyMessages: 1000, fileStorageBytes: 100_000_000 },
+  starter: { websites: 3, members: 5, monthlyConversations: 1000, monthlyMessages: 10000, fileStorageBytes: 1_000_000_000 },
+  pro: { websites: 10, members: 20, monthlyConversations: 10000, monthlyMessages: 100000, fileStorageBytes: 10_000_000_000 },
   business: {
     websites: 100,
     members: 250,
     monthlyConversations: 100000,
-    monthlyMessages: 1000000
+    monthlyMessages: 1000000,
+    fileStorageBytes: 100_000_000_000
   }
 } as const;
 
@@ -44,14 +52,23 @@ export async function reserveWorkspaceUsage(
   if (!workspace) throw new AppError("Workspace not found", 404, "NOT_FOUND");
   const limit = planLimits[workspace.plan][metric];
   const periodStart = currentMonthStart();
+  const [websites, members, monthlyConversations, monthlyMessages] = await Promise.all([
+    Website.countDocuments({ workspaceId: scopeId }),
+    WorkspaceMember.countDocuments({ workspaceId: scopeId, status: "active" }),
+    Conversation.countDocuments({ workspaceId: scopeId, createdAt: { $gte: periodStart } }),
+    Message.countDocuments({ workspaceId: scopeId, createdAt: { $gte: periodStart } })
+  ]);
 
   await SubscriptionUsage.updateOne(
     { workspaceId: scopeId },
     {
       $setOnInsert: {
         workspaceId: scopeId,
-        monthlyConversations: 0,
-        monthlyMessages: 0,
+        websites,
+        members,
+        monthlyConversations,
+        monthlyMessages,
+        fileStorageBytes: 0,
         periodStart
       }
     },
@@ -104,4 +121,24 @@ export async function releaseWorkspaceUsage(
     { workspaceId: scopeId, [metric]: { $gte: amount } },
     { $inc: { [metric]: -amount } }
   );
+}
+
+export async function getWorkspaceUsage(actor: TenantActor, workspaceId: string) {
+  const scope = await requireWorkspaceMember(actor, workspaceId, ["owner", "admin"]);
+  const workspace = await Workspace.findById(scope.workspaceId).select("plan subscriptionStatus").lean();
+  if (!workspace) throw new AppError("Workspace not found", 404, "NOT_FOUND");
+  const usage = await SubscriptionUsage.findOne({ workspaceId: scope.workspaceId }).lean();
+  return {
+    plan: workspace.plan,
+    subscriptionStatus: workspace.subscriptionStatus,
+    limits: planLimits[workspace.plan],
+    usage: {
+      websites: usage?.websites ?? 0,
+      members: usage?.members ?? 0,
+      monthlyConversations: usage?.monthlyConversations ?? 0,
+      monthlyMessages: usage?.monthlyMessages ?? 0,
+      fileStorageBytes: usage?.fileStorageBytes ?? 0,
+      periodStart: usage?.periodStart ?? currentMonthStart()
+    }
+  };
 }

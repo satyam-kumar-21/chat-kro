@@ -22,6 +22,20 @@ import { widgetRouter } from "./routes/widget.js";
 export const app = express();
 
 app.disable("x-powered-by");
+app.use((_request, response, next) => {
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("X-Frame-Options", "DENY");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  response.setHeader(
+    "Content-Security-Policy",
+    "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  );
+  if (env.NODE_ENV === "production") {
+    response.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
+  next();
+});
 app.use("/auth/register", registrationRateLimit);
 app.use("/auth/verify-email", emailVerificationRateLimit);
 app.use("/auth/resend-verification", emailVerificationRateLimit);

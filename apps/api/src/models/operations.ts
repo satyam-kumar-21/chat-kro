@@ -30,6 +30,27 @@ cannedReplySchema.index(
   { unique: true, name: "canned_reply_workspace_shortcut_unique" }
 );
 
+const internalNoteSchema = new Schema(
+  {
+    workspaceId: { ...objectId, ref: "Workspace", required: true },
+    conversationId: { ...objectId, ref: "Conversation", required: true },
+    authorUserId: { ...objectId, ref: "User", required: true },
+    body: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 1,
+      maxlength: 5000,
+      set: sanitizePlainText
+    }
+  } as const,
+  { ...baseSchemaOptions, timestamps: { createdAt: true, updatedAt: false } }
+);
+internalNoteSchema.index(
+  { workspaceId: 1, conversationId: 1, createdAt: 1 },
+  { name: "internal_note_conversation_timeline" }
+);
+
 const invitationSchema = new Schema(
   {
     workspaceId: { ...objectId, ref: "Workspace", required: true },
@@ -141,6 +162,7 @@ const subscriptionUsageSchema = new Schema(
     members: { type: Number, min: 0, default: 1 },
     monthlyConversations: { type: Number, min: 0, default: 0 },
     monthlyMessages: { type: Number, min: 0, default: 0 },
+    fileStorageBytes: { type: Number, min: 0, default: 0 },
     periodStart: { type: Date, required: true, default: () => new Date() }
   } as const,
   baseSchemaOptions
@@ -170,6 +192,7 @@ idempotencyRecordSchema.index(
 );
 
 export const CannedReply = model("CannedReply", cannedReplySchema);
+export const InternalNote = model("InternalNote", internalNoteSchema);
 export const Invitation = model("Invitation", invitationSchema);
 export const Notification = model("Notification", notificationSchema);
 export const AuditLog = model("AuditLog", auditLogSchema);

@@ -134,3 +134,40 @@ export async function getWorkspace(actor: TenantActor, workspaceId: string) {
   if (!workspace) throw new AppError("Workspace not found", 404, "NOT_FOUND");
   return workspace;
 }
+
+export async function updateWorkspaceSettings(actor: TenantActor, workspaceId: string, input: unknown) {
+  const scope = await requireWorkspaceMember(actor, workspaceId, ["owner", "admin"]);
+  const parsed = z.object({
+    name: z.string().trim().min(1).max(120).optional(),
+    timezone: z.string().trim().min(1).max(100).optional(),
+    defaultLanguage: z.string().trim().min(2).max(16).optional(),
+    dataRetentionDays: z.number().int().min(30).max(3650).optional()
+  }).strict().refine((value) => Object.keys(value).length > 0).safeParse(input);
+  if (!parsed.success) throw new AppError("Invalid workspace settings", 400, "VALIDATION_ERROR");
+  if (parsed.data.timezone) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: parsed.data.timezone });
+    } catch {
+      throw new AppError("Invalid IANA timezone", 400, "VALIDATION_ERROR");
+    }
+  }
+  const { name, ...settings } = parsed.data;
+  const update: Record<string, unknown> = {};
+  if (name) update.name = name;
+  for (const [key, value] of Object.entries(settings)) update[`settings.${key}`] = value;
+  const workspace = await Workspace.findOneAndUpdate(
+    { _id: scope.workspaceId },
+    { $set: update },
+    { new: true, runValidators: true }
+  );
+  if (!workspace) throw new AppError("Workspace not found", 404, "NOT_FOUND");
+  await writeAuditLog({
+    workspaceId: scope.workspaceId,
+    actorUserId: scope.userId,
+    action: "workspace.settings_updated",
+    resourceType: "workspace",
+    resourceId: workspace._id,
+    changedFields: Object.keys(parsed.data)
+  });
+  return workspace;
+}

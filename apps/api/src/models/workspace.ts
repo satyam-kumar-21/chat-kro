@@ -187,7 +187,6 @@ const websiteSchema = new Schema(
       type: String,
       required: true,
       default: () => randomBytes(24).toString("base64url"),
-      immutable: true,
       match: /^[A-Za-z0-9_-]{32}$/
     },
     widgetSettings: { type: widgetSettingsSchema, default: () => ({}) },

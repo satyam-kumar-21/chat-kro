@@ -11,6 +11,10 @@ export interface UserRecord {
   termsAcceptedAt?: Date;
   privacyAcceptedAt?: Date;
   lastLoginAt: Date | null;
+  notificationPreferences: {
+    sound: boolean;
+    desktop: boolean;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -44,7 +48,11 @@ const userSchema = new Schema<UserRecord>(
       default: "pending",
       required: true
     },
-    lastLoginAt: { type: Date, default: null }
+    lastLoginAt: { type: Date, default: null },
+    notificationPreferences: {
+      sound: { type: Boolean, default: false },
+      desktop: { type: Boolean, default: false }
+    }
   } as const,
   baseSchemaOptions
 );

@@ -3,6 +3,7 @@ import { messageInputSchema } from "@live-chat/shared";
 import { AppError } from "../errors/app-error.js";
 import { Conversation, Message } from "../models/index.js";
 import { parseObjectId, requireConversation, type TenantActor } from "./tenant-authorization.js";
+import { releaseWorkspaceUsage, reserveWorkspaceUsage } from "./usage-service.js";
 
 export async function listMessages(
   actor: TenantActor,
@@ -76,6 +77,8 @@ export async function persistConversationMessage(input: {
     return existing;
   }
 
+  await reserveWorkspaceUsage(input.workspaceId.toString(), "monthlyMessages");
+  let usageReserved = true;
   const messageDocument = {
     ...messageFilter,
     senderType: input.senderType,
@@ -96,7 +99,10 @@ export async function persistConversationMessage(input: {
         }
         message = created;
       });
-      if (message) return message;
+      if (message) {
+        usageReserved = false;
+        return message;
+      }
     } catch (error) {
       if (!isTransactionUnsupported(error)) throw error;
     } finally {
@@ -105,8 +111,13 @@ export async function persistConversationMessage(input: {
 
     message = await Message.create(messageDocument);
     await updateConversationAfterMessage(input, message);
+    usageReserved = false;
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === 11000) {
+      if (usageReserved) {
+        await releaseWorkspaceUsage(input.workspaceId.toString(), "monthlyMessages");
+        usageReserved = false;
+      }
       const retryResult = await Message.findOne(messageFilter);
       if (
         retryResult &&
@@ -120,6 +131,7 @@ export async function persistConversationMessage(input: {
         throw new AppError("This message id was already used", 409, "IDEMPOTENCY_KEY_REUSED");
       }
     }
+    if (usageReserved) await releaseWorkspaceUsage(input.workspaceId.toString(), "monthlyMessages");
     throw error;
   }
   return message;

@@ -37,6 +37,9 @@ export async function updateMemberRole(
   if (scope.membership.role === "admin" && target.role === "admin") {
     throw new AppError("Workspace member not found", 404, "NOT_FOUND");
   }
+  if (scope.membership.role === "admin" && parsedRole.data === "admin") {
+    throw new AppError("Workspace member not found", 404, "NOT_FOUND");
+  }
 
   const previousRole = target.role;
   target.role = parsedRole.data;

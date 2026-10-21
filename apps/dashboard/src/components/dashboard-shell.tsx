@@ -86,6 +86,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!workspaceId) return;
     window.localStorage.setItem("relay-chat-workspace", workspaceId);
+    window.dispatchEvent(new CustomEvent("relay-workspace-change", { detail: workspaceId }));
     void apiRequest<{ notifications: NotificationItem[] }>(
       `/workspaces/${workspaceId}/notifications`
     ).then((result) => setNotifications(result.notifications)).catch((cause: unknown) => {

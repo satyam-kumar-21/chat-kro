@@ -25,7 +25,11 @@ import {
 import { createRefreshSession } from "../services/identity-service.js";
 import { hashOpaqueToken } from "../services/token-service.js";
 import { createVisitorSessionToken } from "../services/widget-service.js";
-import { closeRealtimeInfrastructure, createRealtimeServer } from "./realtime.js";
+import {
+  closeRealtimeInfrastructure,
+  createRealtimeServer,
+  disconnectWorkspaceMember
+} from "./realtime.js";
 
 const models = [
   AuditLog,
@@ -208,6 +212,35 @@ beforeEach(async () => {
 });
 
 describe("Socket.IO messaging engine", () => {
+  it("reports authorized visitor presence and disconnects", async () => {
+    const agent = await connectAgent();
+    const initialPresenceEvent = new Promise<{ online: boolean }>((resolve) =>
+      agent.once("visitor:presence", resolve)
+    );
+    const joinedAgent = await emitAck<{ ok: boolean }>(agent, "conversation:join", {
+      workspaceId,
+      conversationId
+    });
+    expect(joinedAgent).toMatchObject({ ok: true });
+    const initialPresence = await initialPresenceEvent;
+    expect(initialPresence).toEqual({ online: false });
+
+    const visitor = await connectVisitor();
+    const onlineEvent = new Promise<{ online: boolean }>((resolve) =>
+      agent.once("visitor:presence", resolve)
+    );
+    const joinedVisitor = await emitAck<{ ok: boolean }>(visitor, "conversation:join", { conversationId });
+    expect(joinedVisitor).toMatchObject({ ok: true });
+    await expect(onlineEvent).resolves.toEqual({ online: true });
+
+    const offlineEvent = new Promise<{ online: boolean }>((resolve) =>
+      agent.once("visitor:presence", resolve)
+    );
+    visitor.disconnect();
+    await expect(offlineEvent).resolves.toEqual({ online: false });
+    agent.disconnect();
+  });
+
   it("persists and delivers messages in both directions with idempotent retries and read receipts", async () => {
     const agent = await connectAgent();
     const visitor = await connectVisitor();
@@ -447,6 +480,14 @@ describe("Socket.IO messaging engine", () => {
 
     secondTab.disconnect();
     visitor.disconnect();
+  });
+
+  it("disconnects active member sockets when workspace authorization changes", async () => {
+    const agent = await connectAgent();
+    expect(await emitAck(agent, "inbox:join", { workspaceId })).toMatchObject({ ok: true });
+    const disconnected = new Promise<string>((resolve) => agent.once("disconnect", resolve));
+    await disconnectWorkspaceMember(workspaceId, ownerId);
+    await expect(disconnected).resolves.toBe("io server disconnect");
   });
 
   it("revalidates revoked sessions and validates every payload", async () => {

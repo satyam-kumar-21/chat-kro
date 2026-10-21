@@ -22,12 +22,14 @@ import {
 import { updateMemberRole, listMembers } from "./member-service.js";
 import { createAgentMessage, deleteAgentMessage, listMessages } from "./message-service.js";
 import { getConversation, updateConversation } from "./conversation-service.js";
-import { getWebsite, updateWebsite } from "./website-service.js";
+import { getWebsite, rotateWebsiteWidgetId, updateWebsite } from "./website-service.js";
 import { reserveUsage } from "./usage-service.js";
 import { createRefreshSession, registerUser } from "./identity-service.js";
 import { acceptInvitation, createInvitation } from "./invitation-service.js";
 import { eraseVisitorPersonalData } from "./privacy-service.js";
 import { findOrCreateWidgetVisitor, getVisitor } from "./visitor-service.js";
+import { createCannedReply, listCannedReplies, updateCannedReply } from "./canned-reply-service.js";
+import { getWorkspaceAnalytics } from "./analytics-service.js";
 
 const dbModels = [
   AuditLog,
@@ -314,6 +316,110 @@ describe("workspace tenant isolation", () => {
       updateMemberRole(actorA(), workspaceB._id.toString(), memberB._id.toString(), "admin")
     ).rejects.toMatchObject({ statusCode: 404 });
     expect((await WorkspaceMember.findById(memberB._id))?.role).toBe("agent");
+  });
+
+  it("rotates widget IDs and immediately rejects the prior ID", async () => {
+    const previousId = websiteA.publicWidgetId;
+    const rotated = await rotateWebsiteWidgetId(actorA(), workspaceA._id.toString(), websiteA._id.toString());
+    expect(rotated.publicWidgetId).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    expect(rotated.publicWidgetId).not.toBe(previousId);
+    await expect(findOrCreateWidgetVisitor(previousId, "https://a.example.test", {
+      visitorId: "a".repeat(64)
+    })).rejects.toMatchObject({ statusCode: 403 });
+    await expect(findOrCreateWidgetVisitor(rotated.publicWidgetId, "https://a.example.test", {
+      visitorId: "b".repeat(64)
+    })).resolves.toBeTruthy();
+  });
+
+  it("prevents administrators from self-promoting and preserves the workspace owner", async () => {
+    const adminUser = await User.create({
+      name: "Workspace admin",
+      email: "admin-a@example.test",
+      passwordHash: "test-hash",
+      accountStatus: "active"
+    });
+    const admin = await WorkspaceMember.create({
+      workspaceId: workspaceA._id,
+      userId: adminUser._id,
+      role: "admin",
+      status: "active"
+    });
+    const agent = await WorkspaceMember.create({
+      workspaceId: workspaceA._id,
+      userId: new mongoose.Types.ObjectId(),
+      role: "agent",
+      status: "active"
+    });
+    await expect(updateMemberRole(
+      { userId: adminUser._id.toString() },
+      workspaceA._id.toString(),
+      agent._id.toString(),
+      "admin"
+    )).rejects.toMatchObject({ statusCode: 404 });
+    await expect(updateMemberRole(
+      { userId: adminUser._id.toString() },
+      workspaceA._id.toString(),
+      admin._id.toString(),
+      "supervisor"
+    )).rejects.toMatchObject({ statusCode: 404 });
+    const owner = await WorkspaceMember.findOne({ workspaceId: workspaceA._id, role: "owner" });
+    if (!owner) throw new Error("Workspace owner membership was not created");
+    await expect(updateMemberRole(
+      actorA(),
+      workspaceA._id.toString(),
+      owner._id.toString(),
+      "agent"
+    )).rejects.toMatchObject({ statusCode: 404 });
+    expect((await WorkspaceMember.findById(owner._id))?.role).toBe("owner");
+  });
+
+  it("scopes canned replies and analytics to persisted workspace data", async () => {
+    const reply = await createCannedReply(actorA(), workspaceA._id.toString(), {
+      title: "Greeting",
+      shortcut: "hello",
+      body: "Hello <script>alert(1)</script> there"
+    });
+    expect(reply.body).toBe("Hello  there");
+    expect((await listCannedReplies(actorA(), workspaceA._id.toString(), "hello"))).toHaveLength(1);
+    await expect(updateCannedReply(actorA(), workspaceB._id.toString(), reply._id.toString(), {
+      title: "Cross-workspace change"
+    })).rejects.toMatchObject({ statusCode: 404 });
+
+    const now = Date.now();
+    const createdAt = new Date(now - 60 * 60 * 1000);
+    const visitorMessageAt = new Date(now - 50 * 60 * 1000);
+    const agentMessageAt = new Date(now - 45 * 60 * 1000);
+    const closedAt = new Date(now - 30 * 60 * 1000);
+    await Conversation.collection.updateOne({ _id: conversationA._id }, {
+      $set: { createdAt, status: "resolved", closedAt, assignedAgentId: userA._id }
+    });
+    await Message.create([
+      {
+        workspaceId: workspaceA._id,
+        conversationId: conversationA._id,
+        senderType: "visitor",
+        senderId: visitorA._id,
+        body: "Question",
+        createdAt: visitorMessageAt
+      },
+      {
+        workspaceId: workspaceA._id,
+        conversationId: conversationA._id,
+        senderType: "agent",
+        senderId: userA._id,
+        body: "Answer",
+        createdAt: agentMessageAt
+      }
+    ]);
+    const analytics = await getWorkspaceAnalytics(actorA(), workspaceA._id.toString(), {
+      from: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+      to: new Date(now + 24 * 60 * 60 * 1000).toISOString()
+    });
+    expect(analytics.totals).toMatchObject({ conversations: 1, resolved: 1, messages: 2 });
+    expect(analytics.firstResponseTime).toMatchObject({ averageSeconds: 300, sampleSize: 1 });
+    expect(analytics.resolutionTime).toMatchObject({ averageSeconds: 1800, sampleSize: 1 });
+    expect(analytics.byWebsite).toMatchObject([{ websiteId: websiteA._id.toString(), conversations: 1 }]);
+    expect(analytics.byAgent).toMatchObject([{ agentId: userA._id.toString(), conversations: 1 }]);
   });
 });
 

@@ -133,6 +133,11 @@ export const socketServerToClientSchemas = {
   }).strict(),
   "conversation:resolved": z.object({ status: z.literal("resolved") }).strict(),
   "agent:presence": z.object({ online: z.boolean() }).strict(),
+  "visitor:presence": z.object({ online: z.boolean() }).strict(),
+  "workspace:agent-presence": z.object({
+    userId: objectIdSchema,
+    online: z.boolean()
+  }).strict(),
   "unread:update": z.object({
     conversationId: objectIdSchema,
     visitorUnreadCount: z.number().int().nonnegative(),
@@ -188,6 +193,8 @@ export interface ServerToClientEvents {
   "conversation:read": (event: SocketServerPayload<"conversation:read">) => void;
   "conversation:resolved": (event: SocketServerPayload<"conversation:resolved">) => void;
   "agent:presence": (presence: SocketServerPayload<"agent:presence">) => void;
+  "visitor:presence": (presence: SocketServerPayload<"visitor:presence">) => void;
+  "workspace:agent-presence": (presence: SocketServerPayload<"workspace:agent-presence">) => void;
   "unread:update": (unread: SocketServerPayload<"unread:update">) => void;
   "notification:new": (notification: SocketServerPayload<"notification:new">) => void;
   "socket:error": (error: SocketServerPayload<"socket:error">) => void;

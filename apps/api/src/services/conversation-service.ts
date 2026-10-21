@@ -1,13 +1,17 @@
 import { conversationStatusSchema, objectIdSchema } from "@live-chat/shared";
 import { z } from "zod";
 import { AppError } from "../errors/app-error.js";
-import { Conversation, WorkspaceMember } from "../models/index.js";
+import { Conversation, Visitor, WorkspaceMember } from "../models/index.js";
 import { parseObjectId, requireConversation, requireWorkspaceMember, type TenantActor } from "./tenant-authorization.js";
 import { writeAuditLog } from "./audit.js";
 
 const listSchema = z.object({
   status: conversationStatusSchema.optional(),
   assignedAgentId: objectIdSchema.optional(),
+  assignment: z.enum(["mine", "unassigned"]).optional(),
+  unread: z.coerce.boolean().optional(),
+  search: z.string().trim().max(100).optional(),
+  visitorId: objectIdSchema.optional(),
   before: z.string().datetime().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50)
 });
@@ -22,11 +26,35 @@ export async function listConversations(
   if (!parsed.success) throw new AppError("Invalid conversation query", 400, "VALIDATION_ERROR");
   const filter: Record<string, unknown> = { workspaceId: scope.workspaceId };
   if (parsed.data.status) filter.status = parsed.data.status;
-  if (parsed.data.assignedAgentId) {
+  if (scope.membership.role === "agent") {
+    if (parsed.data.assignedAgentId && parsed.data.assignedAgentId !== scope.userId.toString()) {
+      throw new AppError("Workspace resource not found", 404, "NOT_FOUND");
+    }
+    if (parsed.data.assignment === "mine") filter.assignedAgentId = scope.userId;
+    else if (parsed.data.assignment === "unassigned") filter.assignedAgentId = null;
+    else filter.assignedAgentId = { $in: [null, scope.userId] };
+  } else if (parsed.data.assignedAgentId) {
     filter.assignedAgentId = parseObjectId(parsed.data.assignedAgentId, "agent id");
   }
-  if (scope.membership.role === "agent") {
-    filter.assignedAgentId = { $in: [null, scope.userId] };
+  if (scope.membership.role !== "agent" && parsed.data.assignment === "mine") {
+    filter.assignedAgentId = scope.userId;
+  } else if (scope.membership.role !== "agent" && parsed.data.assignment === "unassigned") {
+    filter.assignedAgentId = null;
+  }
+  if (parsed.data.unread) filter.agentUnreadCount = { $gt: 0 };
+  if (parsed.data.visitorId) filter.visitorId = parseObjectId(parsed.data.visitorId, "visitor id");
+  if (parsed.data.search) {
+    const escapedSearch = parsed.data.search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const expression = new RegExp(escapedSearch, "i");
+    const matchingVisitors = await Visitor.find({
+      workspaceId: scope.workspaceId,
+      $or: [{ displayName: expression }, { email: expression }]
+    }).distinct("_id");
+    filter.$or = [
+      { subject: expression },
+      { lastMessagePreview: expression },
+      { visitorId: { $in: matchingVisitors } }
+    ];
   }
   if (parsed.data.before) filter.lastMessageAt = { $lt: new Date(parsed.data.before) };
   return Conversation.find(filter)

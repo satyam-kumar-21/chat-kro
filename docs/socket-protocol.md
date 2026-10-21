@@ -15,7 +15,7 @@ Conversation rooms use `conversation:<conversationId>`. An agent must be an acti
 
 | Event | Actor | Payload | Successful acknowledgement data |
 |---|---|---|---|
-| `inbox:join` | Agent | `{ workspaceId }` | `{ joined: true, conversations: [...] }` |
+| `inbox:join` | Agent | `{ workspaceId }` | `{ joined: true, conversations: [...], onlineAgentIds: [...] }` |
 | `conversation:open` | Visitor | `{}` | Conversation ID, status, history, and safe conversation snapshot; assigns an online agent when available |
 | `conversation:join` | Both | Visitor: `{ conversationId, after? }`; agent: `{ workspaceId, conversationId, after? }` | `{ joined: true, conversation, messages }`; returns the newest 100 messages when no `after` cursor is supplied |
 | `conversation:message` | Visitor | `{ clientMessageId, body }` | `{ message }`; retained for compatibility with the installed widget |
@@ -43,6 +43,8 @@ Message bodies are text only and limited to 10,000 characters. `clientMessageId`
 | `conversation:read` | `{ readerType: "visitor" \| "agent" }` |
 | `conversation:resolved` | `{ status: "resolved" }` |
 | `agent:presence` | `{ online }` for the authorized website's workspace |
+| `visitor:presence` | `{ online }` for visitors currently joined to an authorized conversation; accounts for multiple visitor tabs |
+| `workspace:agent-presence` | `{ userId, online }` for an active agent in an inbox-authorized workspace; one disconnect does not mark other tabs offline |
 | `unread:update` | `{ conversationId, visitorUnreadCount, agentUnreadCount }` |
 | `notification:new` | `{ id, type, payload }` for the authenticated member |
 | `socket:error` | `{ code, message }` for an event failure |
@@ -63,6 +65,8 @@ Failure codes are `UNAUTHENTICATED`, `FORBIDDEN`, `NOT_FOUND`, `INVALID_ID`, `VA
 Messages are stored before a success acknowledgement or broadcast. Message creation and unread/summary updates use a MongoDB transaction when the deployment supports transactions; standalone development MongoDB uses an idempotent insert plus an atomic conversation update. The unique per-conversation message key prevents duplicate persisted messages. Do not interpret Socket.IO acknowledgements or emissions as exactly-once network delivery.
 
 Conversation history is the durable recovery mechanism. On connect/reconnect the widget re-authorizes its conversation and fetches the most recent 100 persisted messages through the join acknowledgement; dashboard clients can use the `after` ISO timestamp cursor or the paginated HTTP history endpoint. Disconnected recipients therefore recover stored messages instead of relying on a volatile Socket.IO queue. Clients should deduplicate by persisted message ID and retry sends with the original `clientMessageId`.
+
+The dashboard inbox uses `GET /workspaces/:workspaceId/conversations` for server-filtered search, status, assignment, unread, visitor, and cursor pagination. Visitor profile details are returned only after an authorized `visitor:details` request. Internal notes use the authenticated workspace conversation `GET`/`POST .../notes` endpoints and are persisted separately; they are never emitted to visitor sockets or included in message history.
 
 Typing events are never persisted and are rate limited. Message, connection, and general event traffic have limits and a 64 KiB maximum Socket.IO packet size. Presence is calculated from all connected agent sockets in a workspace room, so one tab disconnecting does not mark another tab offline.
 

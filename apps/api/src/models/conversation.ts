@@ -15,6 +15,8 @@ export interface ConversationRecord {
   visitorUnreadCount: number;
   agentUnreadCount: number;
   closedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 const conversationSchema = new Schema<ConversationRecord>(

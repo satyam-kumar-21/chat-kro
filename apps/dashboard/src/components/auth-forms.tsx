@@ -26,6 +26,7 @@ function StatusMessage({ status }: { status: FormStatus | null }) {
 }
 
 export function SignupForm() {
+  const search = useSearchParams();
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<FormStatus | null>(null);
   const [verificationUrl, setVerificationUrl] = useState("");
@@ -52,7 +53,15 @@ export function SignupForm() {
         }
       );
       setStatus({ kind: "success", message: result.message });
-      setVerificationUrl(result.developmentVerificationUrl ?? "");
+      const verification = result.developmentVerificationUrl ?? "";
+      const invitationToken = search.get("invitationToken");
+      if (verification && invitationToken) {
+        const url = new URL(verification);
+        url.searchParams.set("invitationToken", invitationToken);
+        setVerificationUrl(url.toString());
+      } else {
+        setVerificationUrl(verification);
+      }
     } catch (error) {
       setStatus({ kind: "error", message: error instanceof Error ? error.message : "Registration failed." });
     } finally {
@@ -106,6 +115,17 @@ export function LoginForm({ live = false }: { live?: boolean }) {
         "/auth/login",
         { method: "POST", body: JSON.stringify({ email, password }) }
       );
+      const invitationToken = search.get("invitationToken");
+      if (invitationToken) {
+        const accepted = await apiRequest<{ accepted: { workspaceId: string } }>(
+          "/auth/accept-invitation",
+          { method: "POST", body: JSON.stringify({ token: invitationToken }) }
+        );
+        window.localStorage.setItem("relay-chat-workspace", accepted.accepted.workspaceId);
+        router.replace("/dashboard/team");
+        router.refresh();
+        return;
+      }
       if (result.workspaces.length === 0) {
         router.replace("/onboarding");
       } else if (live && result.workspaces.length > 1) {
@@ -128,7 +148,7 @@ export function LoginForm({ live = false }: { live?: boolean }) {
     <AuthCard
       title={live ? "Agent sign in" : "Welcome back"}
       description={live ? "Sign in with your Relay Chat agent account. A widget ID is never used to sign in." : "Sign in to manage your workspace and customer conversations."}
-      footer={<span className="text-slate-600">New to Relay Chat? <Link className="font-medium text-blue-700 hover:underline" href="/signup">Create an account</Link></span>}
+      footer={<span className="text-slate-600">New to Relay Chat? <Link className="font-medium text-blue-700 hover:underline" href={search.get("invitationToken") ? `/signup?invitationToken=${encodeURIComponent(search.get("invitationToken")!)}` : "/signup"}>Create an account</Link></span>}
     >
       <form className="space-y-4" onSubmit={submit}>
         <label className={labelClass}>Email<input name="email" type="email" autoComplete="username" required maxLength={254} className={fieldClass} /></label>
@@ -223,7 +243,10 @@ export function VerifyEmailForm() {
     setBusy(true);
     try {
       await apiRequest("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) });
-      router.replace("/login?verified=1");
+      const invitationToken = search.get("invitationToken");
+      router.replace(invitationToken
+        ? `/loginlive?verified=1&invitationToken=${encodeURIComponent(invitationToken)}`
+        : "/login?verified=1");
     } catch (error) {
       setStatus({ kind: "error", message: error instanceof Error ? error.message : "Verification failed." });
     } finally {

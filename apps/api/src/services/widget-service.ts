@@ -3,6 +3,7 @@ import { Types } from "mongoose";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { AppError } from "../errors/app-error.js";
+import { releaseWorkspaceUsage, reserveWorkspaceUsage } from "./usage-service.js";
 import { Conversation, Message, Visitor, Website } from "../models/index.js";
 import { persistConversationMessage } from "./message-service.js";
 import { findOrCreateWidgetVisitor } from "./visitor-service.js";
@@ -234,14 +235,20 @@ export async function getOrCreateVisitorConversation(visitor: VerifiedWidgetVisi
   }).sort({ lastMessageAt: -1 });
   let created = false;
   if (!conversation) {
-    conversation = await Conversation.create({
-      workspaceId: visitor.workspace,
-      websiteId: visitor.website,
-      visitorId: visitor.visitor,
-      status: "open",
-      lastMessageAt: new Date()
-    });
-    created = true;
+    await reserveWorkspaceUsage(visitor.workspace, "monthlyConversations");
+    try {
+      conversation = await Conversation.create({
+        workspaceId: visitor.workspace,
+        websiteId: visitor.website,
+        visitorId: visitor.visitor,
+        status: "open",
+        lastMessageAt: new Date()
+      });
+      created = true;
+    } catch (error) {
+      await releaseWorkspaceUsage(visitor.workspace, "monthlyConversations");
+      throw error;
+    }
   }
   const messages = await Message.find({
     workspaceId: visitor.workspace,

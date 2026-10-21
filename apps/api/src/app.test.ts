@@ -13,6 +13,9 @@ describe("health endpoints", () => {
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ status: "ok" });
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    expect(response.headers["x-frame-options"]).toBe("DENY");
+    expect(response.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
   });
 
   it("reports that the service is not ready when MongoDB is disconnected", async () => {

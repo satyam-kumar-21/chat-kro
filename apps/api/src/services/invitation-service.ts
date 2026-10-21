@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { AppError } from "../errors/app-error.js";
-import { Invitation, User, WorkspaceMember } from "../models/index.js";
+import { Invitation, User, Workspace, WorkspaceMember } from "../models/index.js";
 import { createOpaqueToken, hashOpaqueToken } from "./token-service.js";
 import {
   parseObjectId,
@@ -58,6 +58,13 @@ export async function createInvitation(
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     invitedBy: scope.userId
   });
+  await writeAuditLog({
+    workspaceId: scope.workspaceId,
+    actorUserId: scope.userId,
+    action: "workspace_invitation.created",
+    resourceType: "invitation",
+    resourceId: invitation._id
+  });
   return {
     invitation: {
       id: invitation._id.toString(),
@@ -68,6 +75,74 @@ export async function createInvitation(
     },
     token
   };
+}
+
+export async function listInvitations(actor: TenantActor, workspaceId: string) {
+  const scope = await requireWorkspaceMember(actor, workspaceId, ["owner", "admin"]);
+  return Invitation.find({
+    workspaceId: scope.workspaceId,
+    acceptedAt: null
+  }).select("email role expiresAt createdAt invitedBy").sort({ createdAt: -1 }).lean();
+}
+
+export async function invitationEmailContext(workspaceId: string, email: string) {
+  const workspace = await Workspace.findById(workspaceId).select("name").lean();
+  return { workspaceName: workspace?.name ?? "your workspace", email };
+}
+
+export async function resendInvitation(
+  actor: TenantActor,
+  workspaceId: string,
+  invitationId: string
+) {
+  const scope = await requireWorkspaceMember(actor, workspaceId, ["owner", "admin"]);
+  const invitation = await Invitation.findOne({
+    _id: parseObjectId(invitationId, "invitation id"),
+    workspaceId: scope.workspaceId,
+    acceptedAt: null
+  });
+  if (!invitation || (scope.membership.role === "admin" && invitation.role === "admin")) {
+    throw new AppError("Invitation not found", 404, "NOT_FOUND");
+  }
+
+  const { token, tokenHash } = createOpaqueToken();
+  invitation.tokenHash = tokenHash;
+  invitation.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  await invitation.save();
+  return {
+    invitation: {
+      id: invitation._id.toString(),
+      workspaceId: invitation.workspaceId.toString(),
+      email: invitation.email,
+      role: invitation.role,
+      expiresAt: invitation.expiresAt
+    },
+    token
+  };
+}
+
+export async function revokeInvitation(
+  actor: TenantActor,
+  workspaceId: string,
+  invitationId: string
+) {
+  const scope = await requireWorkspaceMember(actor, workspaceId, ["owner", "admin"]);
+  const invitation = await Invitation.findOne({
+    _id: parseObjectId(invitationId, "invitation id"),
+    workspaceId: scope.workspaceId,
+    acceptedAt: null
+  });
+  if (!invitation || (scope.membership.role === "admin" && invitation.role === "admin")) {
+    throw new AppError("Invitation not found", 404, "NOT_FOUND");
+  }
+  await Invitation.deleteOne({ _id: invitation._id, workspaceId: scope.workspaceId });
+  await writeAuditLog({
+    workspaceId: scope.workspaceId,
+    actorUserId: scope.userId,
+    action: "workspace_invitation.revoked",
+    resourceType: "invitation",
+    resourceId: invitation._id
+  });
 }
 
 export async function acceptInvitation(actor: TenantActor, token: string) {
@@ -91,19 +166,36 @@ export async function acceptInvitation(actor: TenantActor, token: string) {
   );
   if (!invitation) throw new AppError("Invitation is invalid or expired", 404, "NOT_FOUND");
 
-  let member: InstanceType<typeof WorkspaceMember>;
+  let member: InstanceType<typeof WorkspaceMember> | null = null;
   let usageReserved = false;
   try {
-    await reserveWorkspaceUsage(invitation.workspaceId.toString(), "members");
-    usageReserved = true;
-    member = await WorkspaceMember.create({
+    const existingMember = await WorkspaceMember.findOne({
       workspaceId: invitation.workspaceId,
-      userId,
-      role: invitation.role,
-      status: "active",
-      invitedAt: invitation.createdAt,
-      joinedAt: acceptedAt
+      userId
     });
+    if (existingMember?.status === "active") {
+      throw new AppError("Invitation cannot be accepted for an active member", 409, "INVITATION_CONFLICT");
+    }
+    if (existingMember?.status === "suspended") {
+      await reserveWorkspaceUsage(invitation.workspaceId.toString(), "members");
+      usageReserved = true;
+      existingMember.role = invitation.role;
+      existingMember.status = "active";
+      existingMember.invitedAt = invitation.createdAt;
+      existingMember.joinedAt = acceptedAt;
+      member = await existingMember.save();
+    } else {
+      await reserveWorkspaceUsage(invitation.workspaceId.toString(), "members");
+      usageReserved = true;
+      member = await WorkspaceMember.create({
+        workspaceId: invitation.workspaceId,
+        userId,
+        role: invitation.role,
+        status: "active",
+        invitedAt: invitation.createdAt,
+        joinedAt: acceptedAt
+      });
+    }
   } catch (error) {
     await Invitation.updateOne(
       { _id: invitation._id, acceptedAt },
