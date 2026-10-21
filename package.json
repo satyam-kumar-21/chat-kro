@@ -1,0 +1,30 @@
+{
+  "name": "live-chat-saas",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,dashboard -c blue,green \"npm:dev:api\" \"npm:dev:dashboard\"",
+    "dev:api": "npm run dev --workspace @live-chat/api",
+    "dev:dashboard": "npm run dev --workspace @live-chat/dashboard",
+    "dev:widget": "npm run dev --workspace @live-chat/widget",
+    "prebuild": "npm run build --workspace @live-chat/shared",
+    "prelint": "npm run build --workspace @live-chat/shared",
+    "pretest": "npm run build --workspace @live-chat/shared",
+    "pretypecheck": "npm run build --workspace @live-chat/shared",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "9.2.5"
+  },
+  "engines": {
+    "node": ">=20.19.0",
+    "npm": ">=10.0.0"
+  }
+}

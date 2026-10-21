@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Relay Chat Widget Development Preview</title>
+  </head>
+  <body>
+    <main>
+      <h1>Relay Chat widget preview</h1>
+      <p>Open this page with <code>?widgetId=YOUR_PUBLIC_WIDGET_ID</code> to test the widget locally.</p>
+    </main>
+    <script type="module">
+      const widgetId = new URLSearchParams(window.location.search).get("widgetId");
+      if (widgetId) {
+        const script = document.createElement("script");
+        script.src = "/src/index.ts";
+        script.async = true;
+        script.dataset.widgetId = widgetId;
+        script.dataset.apiUrl = "http://localhost:4000";
+        document.head.append(script);
+      }
+    </script>
+  </body>
+</html>
